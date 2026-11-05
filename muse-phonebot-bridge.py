@@ -180,6 +180,44 @@ class Handler(BaseHTTPRequestHandler):
                 queue = _load_queue()
             msgs = [m for m in queue if m["id"] > since]
             return self._send_json(200, {"messages": msgs})
+
+        if parsed.path == "/twilio/messages":
+            # Read-only message history for the Phonebot weekday text
+            # summary. The bridge calls Twilio server-side with the same
+            # env credentials /send uses, so Muse never holds a Twilio
+            # secret. Query: ?after=<ISO8601> (default: 48h ago).
+            if self._bearer() != os.environ.get("BRIDGE_MUSE_TOKEN", ""):
+                return self._send_json(401, {"error": "unauthorized"})
+            auth = _twilio_auth()
+            if not auth:
+                return self._send_json(500, {"error": "twilio credentials not configured"})
+            sid, user, password = auth
+            after = (query.get("after", [""])[0] or "").strip()
+            if not after:
+                after = (datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            basic = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+            out = []
+            for param in ("To", "From"):
+                q = urllib.parse.urlencode({param: FROM_NUMBER, "DateSentAfter": after, "PageSize": 100})
+                req = urllib.request.Request(
+                    f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json?{q}",
+                    headers={"Authorization": basic})
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        page = json.loads(resp.read().decode())
+                except urllib.error.HTTPError as e:
+                    try:
+                        detail = json.loads(e.read().decode()).get("message")
+                    except Exception:
+                        detail = ""
+                    return self._send_json(e.code, {"error": detail or "twilio error"})
+                for m in page.get("messages", []):
+                    out.append({"sid": m.get("sid"), "from": m.get("from"),
+                                "to": m.get("to"), "body": m.get("body"),
+                                "status": m.get("status"),
+                                "date_sent": m.get("date_sent")})
+            out.sort(key=lambda m: m.get("date_sent") or "")
+            return self._send_json(200, {"messages": out, "after": after})
         return self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
