@@ -1,0 +1,2 @@
+# No dependencies — the bridge uses Python's standard library only.
+# This file exists so Render has something to install (nothing).
